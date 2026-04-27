@@ -146,6 +146,14 @@ These were tested and not kept:
   also used the FP16-shadow rocBLAS path measured `~348.2 tok/s` with
   `ROCBLAS_USE_HIPBLASLT=1`, still below the current dot2/k2x32 path. rocBLAS
   FP16 shadows are not a useful RDNA/Strix Halo bypass for this model.
+- Gate/up via two calls to the existing residual `k2x32` WMMA kernel after
+  zero-filling the output buffers measured `~312.4 tok/s`. The wider residual
+  row tile is not a drop-in replacement for fused gate/up; the extra launches,
+  memset, and separate output traffic outweigh the tiling benefit.
+- Gate/up Q8 activation with a 4-row workgroup tile (`HIPFIRE_GATE_UP_Q8R4=1`)
+  measured `~297.7 tok/s` and was also only approximate math. Reusing a small
+  X tile across four rows was not enough; the quantization overhead and
+  row-wise HFQ4 format still lose to the current dot2 path.
 
 ## DFlash Smoke
 

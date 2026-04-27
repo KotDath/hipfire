@@ -82,6 +82,14 @@ fn has_dot2_f32_f16(arch: &str) -> bool {
 /// kernel. See issue #54 (9070 XT crash report) and
 /// `kernels.rs:311` for the deferred RDNA4 GEMV variant.
 fn has_wmma_f16(arch: &str) -> bool {
+    match std::env::var("HIPFIRE_WMMA").ok().as_deref() {
+        Some("0") => return false,
+        Some("1") => return arch.starts_with("gfx11"),
+        _ => {}
+    }
+    if matches!(arch, "gfx1150" | "gfx1151") {
+        return false;
+    }
     arch.starts_with("gfx11")
 }
 
@@ -2595,11 +2603,20 @@ impl Gpu {
         let batch_tiles = { const BATCH_TILE: usize = 8; (batch_size + BATCH_TILE - 1) / BATCH_TILE };
         let total_m = (qkv_m + z_m + beta_m + alpha_m) as u32;
 
-        unsafe {
+        let bytes = crate::profile::gemv_hfq4g256_bytes(qkv_m, k)
+                  + crate::profile::gemv_hfq4g256_bytes(z_m, k)
+                  + crate::profile::gemv_hfq4g256_bytes(beta_m, k)
+                  + crate::profile::gemv_hfq4g256_bytes(alpha_m, k)
+                  + batch_size * k * 2
+                  + batch_size * (qkv_m + z_m + beta_m + alpha_m) * 4;
+        let timer = crate::profile::begin_timer(&self.hip, "gemm", "gemm_qkvza_hfq4g256_dot2", bytes);
+        let result = unsafe {
             self.hip.launch_kernel(
                 func, [total_m, batch_tiles as u32, 1], [32, 1, 1], 0, self.stream_ref(), &mut params,
             )
-        }
+        };
+        if let Some(t) = timer { t.finish(&self.hip); }
+        result
     }
 
     /// Batched 3-way fused HFQ4-G256 GEMM for the FA preamble.
@@ -2847,11 +2864,19 @@ impl Gpu {
         let batch_tiles = { const BATCH_TILE: usize = 8; (batch_size + BATCH_TILE - 1) / BATCH_TILE };
         let total_m = (q_m + k_m + v_m) as u32;
 
-        unsafe {
+        let bytes = crate::profile::gemv_hfq4g256_bytes(q_m, k)
+                  + crate::profile::gemv_hfq4g256_bytes(k_m, k)
+                  + crate::profile::gemv_hfq4g256_bytes(v_m, k)
+                  + batch_size * k * 2
+                  + batch_size * (q_m + k_m + v_m) * 4;
+        let timer = crate::profile::begin_timer(&self.hip, "gemm", "gemm_qkv_hfq4g256_dot2", bytes);
+        let result = unsafe {
             self.hip.launch_kernel(
                 func, [total_m, batch_tiles as u32, 1], [32, 1, 1], 0, self.stream_ref(), &mut params,
             )
-        }
+        };
+        if let Some(t) = timer { t.finish(&self.hip); }
+        result
     }
 
     /// Batched 2-way fused HFQ4-G256 GEMM for the FFN preamble (gate + up).
@@ -3004,11 +3029,18 @@ impl Gpu {
         let batch_tiles = { const BATCH_TILE: usize = 8; (batch_size + BATCH_TILE - 1) / BATCH_TILE };
         let total_m = (gate_m + up_m) as u32;
 
-        unsafe {
+        let bytes = crate::profile::gemv_hfq4g256_bytes(gate_m, k)
+                  + crate::profile::gemv_hfq4g256_bytes(up_m, k)
+                  + batch_size * k * 2
+                  + batch_size * (gate_m + up_m) * 4;
+        let timer = crate::profile::begin_timer(&self.hip, "gemm", "gemm_gate_up_hfq4g256_dot2", bytes);
+        let result = unsafe {
             self.hip.launch_kernel(
                 func, [total_m, batch_tiles as u32, 1], [32, 1, 1], 0, self.stream_ref(), &mut params,
             )
-        }
+        };
+        if let Some(t) = timer { t.finish(&self.hip); }
+        result
     }
 
     /// FP16-packed batched 2-way fused HFQ4-G256 GEMM (gate + up).

@@ -232,6 +232,13 @@ fn main() {
     let mut sorted = per_token_ms.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = sorted.len();
+    if n == 0 {
+        eprintln!("  total: {gen_total_ms:.1}ms over 0 tokens");
+        eprintln!("  tok/s (gen): 0.0");
+        eprintln!();
+        eprintln!("SUMMARY  gen_tok_s=0.0  bw_gib_s=0.0  prefill_tok_s={prefill_tok_s:.1}  avg_ms=0.00  p50_ms=0.00");
+        return;
+    }
     let sum: f64 = sorted.iter().sum();
     let avg_ms = sum / n as f64;
     let min_ms = sorted[0];

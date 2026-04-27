@@ -7,6 +7,8 @@ Models:
 - llama.cpp: `/home/kotdath/omp/personal/amd-strix-halo-toolboxes/models/Qwen3.5-9B-Q4_K_M.gguf`
 - hipfire target: `~/.hipfire/models/qwen3.5-9b.mq4`
 - hipfire draft: `~/.hipfire/models/qwen35-9b-dflash-mq4.hfq`
+- hipfire target converted from the Unsloth GGUF:
+  `/home/kotdath/omp/personal/amd-strix-halo-toolboxes/models/qwen3.5-9b-unsloth.hf4`
 
 Binaries:
 
@@ -58,6 +60,31 @@ gfx1150/gfx1151 only:
 
 This is a small but repeatable +5% over the same-binary `k2` baseline.
 
+Re-check after the negative experiments were reverted:
+
+| Prompt tokens | Run tok/s | Median tok/s | Gen tok/s |
+| ---: | --- | ---: | ---: |
+| 2048 | 355.8, 354.2, 354.0 | 354.2 | 42.8 |
+
+Changing `HIPFIRE_PREFILL_MAX_BATCH` did not materially move pp2048:
+
+| Max batch | Prefill tok/s |
+| ---: | ---: |
+| 64 | 361.5 |
+| 128 | 356.3 |
+| 192 | 358.9 |
+| 256 | 357.2 |
+| 384 | 359.0 |
+| 512 | 351.6 |
+
+## Model Artifact Check
+
+The Unsloth GGUF was converted into hipfire `hf4` format and benchmarked with
+the same Q8 KV prefill command. The result was `357.8 tok/s` median and `43.5`
+gen tok/s, matching the native hipfire `.mq4` within noise. This rules out the
+final Unsloth/GGUF model artifact as the cause of the 3x prefill gap; the gap
+is in the hipfire execution format/kernels.
+
 ## Negative Experiments
 
 These were tested and not kept:
@@ -74,6 +101,20 @@ These were tested and not kept:
 - 32x2 thread-block grouping for `gemm_gate_up_hfq4g256_dot2`: compiled and ran
   after fixing launch bounds, but measured about `354 tok/s`, i.e. no useful
   improvement over the simpler dot2 kernel.
+- `HIPFIRE_WMMA=1` re-check after the residual routing change: about `225 tok/s`;
+  gate/up WMMA alone was roughly 18 ms/call vs about 11 ms/call for dot2.
+- Gate/up WMMA x32, modeled after the residual `k2x32` variant: about
+  `235.5 tok/s`; still much slower than dot2.
+- Gate/up dot2 with `BATCH_TILE=16` only: about `239 tok/s`; more batch rows per
+  workgroup increased register pressure enough to lose badly.
+- Gate/up dot2 multi-wave/LDS weight-sharing experiment: about `264.7 tok/s`;
+  sharing did not compensate for occupancy and scheduling costs.
+- `HIPFIRE_ROCBLAS_ALL_ARCHS=1 HIPFIRE_ROCBLAS_MIN_BATCH=1 ROCBLAS_USE_HIPBLASLT=1`:
+  about `294 tok/s`; RDNA rocBLAS/hipBLASLt was still slower than the custom
+  kernels for this format.
+- Gate/up Q8-activation integer-dot experiment: compiled with `sudot4` on
+  gfx1151 but measured about `309 tok/s`. Simple per-call Q8 activation
+  quantization without MMQ-style row/batch tiling is a regression.
 
 ## DFlash Smoke
 
@@ -94,6 +135,19 @@ fix shows the remaining prefill time is dominated by 4-bit GEMM:
 - `gemm_hfq4g256_residual_wmma_k2x32`: ~27%
 - `gemm_qkvza_hfq4g256_dot2`: ~13%
 - `gemm_qkv_hfq4g256_dot2`: ~3.5%
+
+The gap also does not appear to be DPM/power-state driven. During the same
+session, sysfs reported `power_dpm_force_performance_level=auto` and
+`sclk=775Mhz`, but llama.cpp still measured `1069.93 tok/s` for pp2048. That
+keeps the comparison valid: llama.cpp is fast in the same observed state where
+hipfire is about `354-357 tok/s`.
+
+The structural difference is the GEMM algorithm. llama.cpp's HIP/CUDA backend
+routes quantized prompt processing through MMQ: it quantizes the activation
+matrix into a `q8_1` layout and tiles both the batch dimension and the weight
+rows. Hipfire's current hot kernels are still row-wise HFQ4 GEMMs: one output
+row by an 8-token batch tile per workgroup, with per-row dequantization. Local
+tweaks to this design did not close the gap.
 
 The measured safe improvements are:
 

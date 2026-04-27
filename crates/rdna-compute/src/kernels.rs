@@ -958,4 +958,3 @@ pub const REPEAT_INTERLEAVE_QK_SRC: &str = include_str!("../../../kernels/src/re
 
 /// Batched repeat-interleave Q and K key heads up to value heads count.
 pub const REPEAT_INTERLEAVE_QK_BATCHED_SRC: &str = include_str!("../../../kernels/src/repeat_interleave_qk_batched.hip");
-

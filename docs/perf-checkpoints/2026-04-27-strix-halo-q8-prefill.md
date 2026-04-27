@@ -76,6 +76,12 @@ Changing `HIPFIRE_PREFILL_MAX_BATCH` did not materially move pp2048:
 | 256 | 357.2 |
 | 384 | 359.0 |
 | 512 | 351.6 |
+| 1024 | 304.5 |
+| 2048 | 306.8 |
+
+The larger 1024/2048-token chunks regress instead of converging toward
+llama.cpp, so the gap is not caused by hipfire's default chunk size being too
+small.
 
 ## Model Artifact Check
 
@@ -130,6 +136,16 @@ These were tested and not kept:
   moved pp2048 to `~363 tok/s`. This matters for apples-to-apples methodology
   because llama.cpp's `llama-bench` calls `llama_batch_get_one(...)` with
   `logits=nullptr`, but it does not explain the gap.
+- Gate/up Q8 activation prototype (`HIPFIRE_GATE_UP_Q8X=1`) quantized the
+  activation matrix once per gate/up call and used gfx1151 integer dot
+  instructions, but stayed in hipfire's row-wise work decomposition. It
+  measured `~189.5 tok/s`, much slower than the dot2 baseline. This confirms
+  that the llama.cpp-like win is not "Q8 activations" alone; it requires the
+  MMQ row/batch tiling layout.
+- Extending the existing `HIPFIRE_ROCBLAS_ALL_ARCHS=1` experiment so gate/up
+  also used the FP16-shadow rocBLAS path measured `~348.2 tok/s` with
+  `ROCBLAS_USE_HIPBLASLT=1`, still below the current dot2/k2x32 path. rocBLAS
+  FP16 shadows are not a useful RDNA/Strix Halo bypass for this model.
 
 ## DFlash Smoke
 

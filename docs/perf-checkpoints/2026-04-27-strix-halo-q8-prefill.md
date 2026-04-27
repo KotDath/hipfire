@@ -154,6 +154,11 @@ These were tested and not kept:
   measured `~297.7 tok/s` and was also only approximate math. Reusing a small
   X tile across four rows was not enough; the quantization overhead and
   row-wise HFQ4 format still lose to the current dot2 path.
+- Existing decode-style Q4_K kernels are not the missing piece. The
+  `bench_hfq4g128` microbench on gfx1151 measured HFQ4 faster than Q4K for
+  single-vector GEMV shapes, e.g. `4096x4096`: HFQ4 `15.4 us` vs Q4K
+  `32.6 us`, and `12288x4096`: HFQ4 `50.3 us` vs Q4K `97.9 us`. The llama.cpp
+  advantage is the batched MMQ algorithm, not the raw Q4_K format alone.
 
 ## DFlash Smoke
 

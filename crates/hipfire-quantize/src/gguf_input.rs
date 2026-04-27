@@ -412,6 +412,69 @@ fn dequant_q4_k(data: &[u8], n: usize) -> Vec<f32> {
     out
 }
 
+fn get_scale_min_k4(j: usize, q: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (q[j] & 63, q[j + 4] & 63)
+    } else {
+        (
+            (q[j + 4] & 0x0F) | ((q[j - 4] >> 6) << 4),
+            (q[j + 4] >> 4) | ((q[j] >> 6) << 4),
+        )
+    }
+}
+
+fn dequant_q5_k(data: &[u8], n: usize) -> Vec<f32> {
+    let block_size = 256;
+    let block_bytes = 176;
+    let nblocks = (n + block_size - 1) / block_size;
+    let mut out = vec![0.0f32; n];
+    for b in 0..nblocks {
+        let off = b * block_bytes;
+        if off + block_bytes > data.len() {
+            break;
+        }
+
+        let d = f16_to_f32(u16::from_le_bytes([data[off], data[off + 1]]));
+        let dmin = f16_to_f32(u16::from_le_bytes([data[off + 2], data[off + 3]]));
+        let scales = &data[off + 4..off + 16];
+        let qh = &data[off + 16..off + 48];
+        let mut ql = &data[off + 48..off + 176];
+
+        let mut is = 0usize;
+        let mut u1 = 1u8;
+        let mut u2 = 2u8;
+        for j in (0..block_size).step_by(64) {
+            let (sc1, m1q) = get_scale_min_k4(is, scales);
+            let (sc2, m2q) = get_scale_min_k4(is + 1, scales);
+            let d1 = d * sc1 as f32;
+            let m1 = dmin * m1q as f32;
+            let d2 = d * sc2 as f32;
+            let m2 = dmin * m2q as f32;
+
+            for l in 0..32 {
+                let idx = b * block_size + j + l;
+                if idx < n {
+                    let q = (ql[l] & 0x0F) + if (qh[l] & u1) != 0 { 16 } else { 0 };
+                    out[idx] = d1 * q as f32 - m1;
+                }
+            }
+            for l in 0..32 {
+                let idx = b * block_size + j + 32 + l;
+                if idx < n {
+                    let q = (ql[l] >> 4) + if (qh[l] & u2) != 0 { 16 } else { 0 };
+                    out[idx] = d2 * q as f32 - m2;
+                }
+            }
+
+            ql = &ql[32..];
+            is += 2;
+            u1 <<= 2;
+            u2 <<= 2;
+        }
+    }
+    out
+}
+
 fn dequant_q6_k(data: &[u8], n: usize) -> Vec<f32> {
     let block_size = 256;
     let block_bytes = 210;
@@ -480,6 +543,7 @@ pub fn tensor_to_f32(info: &TensorInfo, data: &[u8]) -> Vec<f32> {
         GgmlType::Q4_0 => dequant_q4_0(data, n),
         GgmlType::Q8_0 => dequant_q8_0(data, n),
         GgmlType::Q4K => dequant_q4_k(data, n),
+        GgmlType::Q5K => dequant_q5_k(data, n),
         GgmlType::Q6K => dequant_q6_k(data, n),
         other => panic!(
             "GGUF tensor type {:?} not implemented (tensor: {})",

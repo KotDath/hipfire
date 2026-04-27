@@ -1132,7 +1132,11 @@ fn is_gguf_input(p: &Path) -> bool {
 /// Returns None for tensors that don't have a known safetensors equivalent
 /// (we then keep them under their GGUF name; the future loader can decide
 /// what to do, or they're skipped).
-fn gguf_to_safetensors_name(gguf_name: &str) -> Option<String> {
+fn gguf_to_safetensors_name_for_arch(gguf_name: &str, arch_str: &str) -> Option<String> {
+    if arch_str == "qwen35" {
+        return gguf_qwen35_to_safetensors_name(gguf_name);
+    }
+
     // Top-level tensors.
     match gguf_name {
         "token_embd.weight" => return Some("model.embed_tokens.weight".to_string()),
@@ -1165,6 +1169,50 @@ fn gguf_to_safetensors_name(gguf_name: &str) -> Option<String> {
         return Some(format!("model.layers.{layer_idx}.{translated}.weight"));
     }
     None
+}
+
+fn gguf_qwen35_to_safetensors_name(gguf_name: &str) -> Option<String> {
+    match gguf_name {
+        "token_embd.weight" => return Some("model.language_model.embed_tokens.weight".to_string()),
+        "output.weight" => return Some("lm_head.weight".to_string()),
+        "output_norm.weight" => return Some("model.language_model.norm.weight".to_string()),
+        _ => {}
+    }
+
+    let rest = gguf_name.strip_prefix("blk.")?;
+    let dot = rest.find('.')?;
+    let layer_idx = &rest[..dot];
+    let slot_full = &rest[dot + 1..];
+    let p = format!("model.language_model.layers.{layer_idx}");
+
+    let translated = match slot_full {
+        "attn_norm.weight" => "input_layernorm.weight".to_string(),
+        "ffn_norm.weight" | "post_attention_norm.weight" => {
+            "post_attention_layernorm.weight".to_string()
+        }
+        "ffn_gate.weight" => "mlp.gate_proj.weight".to_string(),
+        "ffn_up.weight" => "mlp.up_proj.weight".to_string(),
+        "ffn_down.weight" => "mlp.down_proj.weight".to_string(),
+
+        "attn_qkv.weight" => "linear_attn.in_proj_qkv.weight".to_string(),
+        "attn_gate.weight" => "linear_attn.in_proj_z.weight".to_string(),
+        "ssm_alpha.weight" => "linear_attn.in_proj_a.weight".to_string(),
+        "ssm_beta.weight" => "linear_attn.in_proj_b.weight".to_string(),
+        "ssm_a" => "linear_attn.A_log".to_string(),
+        "ssm_dt.bias" => "linear_attn.dt_bias".to_string(),
+        "ssm_conv1d.weight" => "linear_attn.conv1d.weight".to_string(),
+        "ssm_norm.weight" => "linear_attn.norm.weight".to_string(),
+        "ssm_out.weight" => "linear_attn.out_proj.weight".to_string(),
+
+        "attn_q.weight" => "self_attn.q_proj.weight".to_string(),
+        "attn_k.weight" => "self_attn.k_proj.weight".to_string(),
+        "attn_v.weight" => "self_attn.v_proj.weight".to_string(),
+        "attn_output.weight" => "self_attn.o_proj.weight".to_string(),
+        "attn_q_norm.weight" => "self_attn.q_norm.weight".to_string(),
+        "attn_k_norm.weight" => "self_attn.k_norm.weight".to_string(),
+        _ => return None,
+    };
+    Some(format!("{p}.{translated}"))
 }
 
 /// True if the GGUF tensor's name is a 1D norm / RMSNorm scaling vector.
@@ -1242,9 +1290,10 @@ fn config_json_from_gguf(
     let eos = read_u("tokenizer.ggml.eos_token_id").unwrap_or(2);
 
     let mut cfg = serde_json::Map::new();
+    let model_type = if arch_str == "qwen35" { "qwen3_5" } else { arch_str };
     cfg.insert(
         "model_type".to_string(),
-        serde_json::Value::from(arch_str.to_string()),
+        serde_json::Value::from(model_type.to_string()),
     );
     if let Some(v) = dim {
         cfg.insert("hidden_size".to_string(), serde_json::Value::from(v));
@@ -1287,6 +1336,47 @@ fn config_json_from_gguf(
     }
     if let Some(v) = head_dim {
         cfg.insert("head_dim".to_string(), serde_json::Value::from(v));
+    }
+    if arch_str == "qwen35" {
+        if let Some(v) = read_u(&format!("{prefix}.attention.key_length")) {
+            cfg.insert("linear_key_head_dim".to_string(), serde_json::Value::from(v / 2));
+        }
+        if let Some(v) = read_u(&format!("{prefix}.attention.value_length")) {
+            cfg.insert("linear_value_head_dim".to_string(), serde_json::Value::from(v / 2));
+        }
+        if let Some(v) = read_u(&format!("{prefix}.ssm.group_count")) {
+            cfg.insert("linear_num_key_heads".to_string(), serde_json::Value::from(v));
+            cfg.insert("linear_num_value_heads".to_string(), serde_json::Value::from(v * 2));
+        }
+        if let Some(v) = read_u(&format!("{prefix}.ssm.conv_kernel")) {
+            cfg.insert("linear_conv_kernel_dim".to_string(), serde_json::Value::from(v));
+        }
+        if let Some(v) = read_u(&format!("{prefix}.full_attention_interval")) {
+            if let Some(layers) = n_layers {
+                let arr = (0..layers)
+                    .map(|i| {
+                        if v > 0 && (i + 1) % v == 0 {
+                            serde_json::Value::from("full_attention")
+                        } else {
+                            serde_json::Value::from("linear_attention")
+                        }
+                    })
+                    .collect();
+                cfg.insert("layer_types".to_string(), serde_json::Value::Array(arr));
+            }
+        }
+        if let Some(theta) = rope_theta {
+            cfg.insert(
+                "rope_parameters".to_string(),
+                serde_json::json!({
+                    "rope_theta": theta,
+                    "partial_rotary_factor": 0.25,
+                    "mrope_interleaved": true,
+                    "mrope_section": [11, 11, 10],
+                    "rope_type": "default"
+                }),
+            );
+        }
     }
     cfg.insert("bos_token_id".to_string(), serde_json::Value::from(bos));
     cfg.insert("eos_token_id".to_string(), serde_json::Value::from(eos));
@@ -1394,6 +1484,7 @@ fn run_gguf_pipeline(input: &Path, output: &Path, format: GgufFormat) -> std::io
     let arch_id: u32 = match arch_str.as_str() {
         "llama" => 0,
         "qwen3" | "qwen2" => 1,
+        "qwen35" => 5,
         "qwen3moe" => 6,
         other => {
             eprintln!("warning: unknown GGUF architecture '{other}', tagging as llama-compatible");
@@ -1444,7 +1535,7 @@ fn run_gguf_pipeline(input: &Path, output: &Path, format: GgufFormat) -> std::io
         // Translate to the safetensors-style name `engine::hfq::load_weights_hfq`
         // expects. If we don't have a translation, keep the original name —
         // the future loader can ignore unknown tensors.
-        let out_name = gguf_to_safetensors_name(&info.name)
+        let out_name = gguf_to_safetensors_name_for_arch(&info.name, &arch_str)
             .unwrap_or_else(|| info.name.clone());
 
         let (data, quant_type, group_size, label) = if is_norm || !is_2d {

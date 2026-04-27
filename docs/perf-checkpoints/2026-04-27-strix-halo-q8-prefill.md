@@ -115,6 +115,21 @@ These were tested and not kept:
 - Gate/up Q8-activation integer-dot experiment: compiled with `sudot4` on
   gfx1151 but measured about `309 tok/s`. Simple per-call Q8 activation
   quantization without MMQ-style row/batch tiling is a regression.
+- Gate/up dot2 `BATCH_TILE=4`: the first apparent `~378 tok/s` result was an
+  invalid host/kernel tile mismatch. The corrected implementation measured
+  about `294 tok/s`, so it was reverted.
+- Gate/up dot2 `__launch_bounds__(32, 16)`: measured `360.8 tok/s` median vs
+  `359.7 tok/s` for the default `__launch_bounds__(32, 8)` in the same A/B
+  session. This is measurement noise, not a useful tuning point.
+- `HIPFIRE_MW16=1` residual path with per-call HFQ4->FP16 dequant: regressed to
+  `~72-108 tok/s`. Dequantizing every prefill call is too expensive.
+- Cached FP16-shadow residual MW16 prototype: reusing dequantized residual
+  weights still measured only `~178 tok/s`, slower than the existing residual
+  `k2x32` WMMA path on gfx1151.
+- Skipping final prefill logits (temporary `HIPFIRE_PREFILL_SKIP_LOGITS=1`) only
+  moved pp2048 to `~363 tok/s`. This matters for apples-to-apples methodology
+  because llama.cpp's `llama-bench` calls `llama_batch_get_one(...)` with
+  `logits=nullptr`, but it does not explain the gap.
 
 ## DFlash Smoke
 
@@ -148,6 +163,22 @@ matrix into a `q8_1` layout and tiles both the batch dimension and the weight
 rows. Hipfire's current hot kernels are still row-wise HFQ4 GEMMs: one output
 row by an 8-token batch tile per workgroup, with per-row dequantization. Local
 tweaks to this design did not close the gap.
+
+Two details from llama.cpp matter for a faithful port:
+
+- `tools/llama-bench/llama-bench.cpp::test_prompt` uses
+  `llama_batch_get_one(tokens.data(), n_tokens)`.
+- `src/llama-batch.cpp::llama_batch_get_one` sets `logits = nullptr`, so the
+  prompt-processing number is not dominated by final logits. Hipfire's
+  temporary no-logits test confirmed this is not the main gap.
+
+The MMQ path then routes through `ggml_cuda_mul_mat_q`, first quantizing the
+activation matrix with `quantize_mmq_q8_1_cuda`, then launching
+`mul_mat_q_case<GGML_TYPE_Q4_K>`. For AMD, llama.cpp uses `mmq_y=128`,
+`MMQ_ITER_K=256`, and Q4_K/Q8_1 vector-dot helpers with
+`VDR_Q4_K_Q8_1_MMQ=8`. That design reuses the activation tile across many
+weight rows; hipfire currently reloads/reprocesses activation data per output
+row tile.
 
 The measured safe improvements are:
 

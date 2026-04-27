@@ -4295,15 +4295,19 @@ impl Gpu {
         // auto selection (applies to every call, both target and draft).
         //   ksplit — K-split + atomicAdd (non-deterministic accum order)
         //   k2     — 2× K-tile pipeline (byte-exact accum order)
-        //   k2x32  — 32-row block with shared X fragment per K-tile; measured
-        //            46% slower than k2 at M=248320 on 7900 XTX (1564µs → 2287µs,
-        //            450→310 GB/s). Likely register pressure / occupancy loss
-        //            from the doubled accumulator + 4× dequant path. Kept opt-in
-        //            for future revisit (needs LDS-staged B share + reg budget).
+        //   k2x32  — 32-row block with shared X fragment per K-tile. Slower
+        //            than k2 on gfx1100, but faster on gfx1151 Strix Halo
+        //            for Qwen3.5 9B prefill (pp2048 q8: 339.7 → 351.3 tok/s).
         //   k4     — 4× K-tile pipeline (output-mapping bug, τ=0 on dflash — debug only)
         //   wmma   — base WMMA         (output-mapping bug — debug only)
         //   wmma2  — 2-wave block, 32 rows × 16 batch (output-mapping bug — debug only)
-        let auto_variant = if m >= 8192 { "k2" } else { "ksplit" };
+        let auto_variant = if matches!(self.arch.as_str(), "gfx1150" | "gfx1151") {
+            "k2x32"
+        } else if m >= 8192 {
+            "k2"
+        } else {
+            "ksplit"
+        };
         let variant_override = std::env::var("HIPFIRE_WO_WMMA_VARIANT").ok();
         let variant = variant_override.as_deref().unwrap_or(auto_variant);
         let (kernel_name, kernel_src, block_size, row_step, k_splits) = match variant {
